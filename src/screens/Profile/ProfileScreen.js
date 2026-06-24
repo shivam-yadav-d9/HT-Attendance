@@ -11,8 +11,10 @@ import {
 } from 'react-native';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import geofenceService from '../../services/geofence.service';
+import { CommonActions, useNavigation, useNavigationContainerRef } from '@react-navigation/native';
 
-export default function ProfileScreen({ navigation }) {
+export default function ProfileScreen() {
+  const navigation = useNavigation();
   const [userData, setUserData] = useState(null);
 
   useEffect(() => {
@@ -36,8 +38,14 @@ export default function ProfileScreen({ navigation }) {
         style: 'destructive',
         onPress: async () => {
           try {
-            // Stop geofence tracking before clearing session
-            await geofenceService.stopTracking();
+            // Stop geofence tracking
+            try {
+              await geofenceService.stopTracking();
+            } catch (stopError) {
+              console.warn('stopTracking failed (non-fatal):', stopError);
+            }
+
+            // Clear all user data
             await AsyncStorage.multiRemove([
               'userToken',
               'userData',
@@ -45,9 +53,17 @@ export default function ProfileScreen({ navigation }) {
               'bgTaskWasInside',
               'bgActiveSession',
             ]);
-            navigation.replace('Login');
+
+            // ✅ FIX: Use navigation.reset directly without getParent()
+            // This works because we're using the hook from the root navigator
+            navigation.reset({
+              index: 0,
+              routes: [{ name: 'Login' }],
+            });
+            
           } catch (error) {
             console.error('Logout error:', error);
+            Alert.alert('Error', 'Failed to logout. Please try again.');
           }
         },
       },
@@ -134,7 +150,12 @@ export default function ProfileScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F5F7FA' },
-  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#F5F7FA' },
+  loadingContainer: { 
+    flex: 1, 
+    justifyContent: 'center', 
+    alignItems: 'center', 
+    backgroundColor: '#F5F7FA' 
+  },
   loadingText: { color: '#666', fontSize: 14 },
   header: {
     backgroundColor: '#0F2D52',
@@ -166,7 +187,12 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.05,
     shadowRadius: 4,
   },
-  sectionTitle: { fontSize: 18, fontWeight: 'bold', color: '#111827', marginBottom: 15 },
+  sectionTitle: { 
+    fontSize: 18, 
+    fontWeight: 'bold', 
+    color: '#111827', 
+    marginBottom: 15 
+  },
   infoItem: {
     flexDirection: 'row',
     alignItems: 'center',

@@ -1,7 +1,28 @@
 // src/screens/Attendance/AttendanceScreen.js
+//
+// FIX (this version):
+//   Previous version derived "checked in" status from the daily history
+//   aggregate (`oldestCheckIn` / `latestCheckOut`), and ONLY re-read the
+//   `isInsideOfficeGeofence` flag inside the ATTENDANCE_UPDATED_EVENT
+//   listener. If a transition's API call failed (see geofence.service.js
+//   fix), the event either didn't fire the way the UI expected or fired
+//   with stale data, and the screen stayed wrong until the next
+//   successful transition.
+//
+//   Fix: `isInsideOfficeGeofence` is now the single source of truth for
+//   live status (matching the fixed geofence.service.js, which commits
+//   it from real GPS truth and never reverts it on API failure). The
+//   screen also re-reads it on:
+//     - mount
+//     - every ATTENDANCE_UPDATED_EVENT
+//     - app foreground (AppState)
+//     - a 10s safety poll while screen is focused
+//   so it can never silently go stale.
+
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+    AppState,
     DeviceEventEmitter,
     RefreshControl,
     ScrollView,
@@ -15,6 +36,8 @@ import attendanceService from '../../services/attendance.service';
 import geofenceService, {
     ATTENDANCE_UPDATED_EVENT,
 } from '../../services/geofence.service';
+
+const KEY_INSIDE_OFFICE = 'isInsideOfficeGeofence';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const formatTime = dateString => {
@@ -63,80 +86,39 @@ export default function AttendanceScreen() {
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
     const [todayAttendance, setTodayAttendance] = useState(null);
-    const [currentStatus, setCurrentStatus] = useState('CHECKED_OUT');
     const [liveDuration, setLiveDuration] = useState('0h 0m 0s');
     const [activeCheckIn, setActiveCheckIn] = useState(null);
     const [employeeInfo, setEmployeeInfo] = useState(null);
+    // Single source of truth for "am I checked in right now" — driven by
+    // the native geofence flag, NOT re-derived from the history aggregate.
     const [isInsideGeofence, setIsInsideGeofence] = useState(false);
+    const [isSyncing, setIsSyncing] = useState(false);
     const [lastEvent, setLastEvent] = useState(null);
-    // Keep latest todayAttendance in a ref so the timer closure stays fresh
+
+    // Keep latest values in refs so the 1s timer closure stays fresh
+    // without needing to be torn down/recreated every render.
     const todayRef = useRef(todayAttendance);
     const activeCheckInRef = useRef(activeCheckIn);
-    const currentStatusRef = useRef(currentStatus);
+    const isInsideRef = useRef(isInsideGeofence);
     useEffect(() => { todayRef.current = todayAttendance; }, [todayAttendance]);
     useEffect(() => { activeCheckInRef.current = activeCheckIn; }, [activeCheckIn]);
-    useEffect(() => { currentStatusRef.current = currentStatus; }, [currentStatus]);
+    useEffect(() => { isInsideRef.current = isInsideGeofence; }, [isInsideGeofence]);
 
-    // ── Initial load ──────────────────────────────────────────────────────────
-    useEffect(() => {
-        const loadData = async () => {
-            await loadAttendanceData();
-
-            const inside =
-                (await AsyncStorage.getItem(
-                    'isInsideOfficeGeofence',
-                )) === 'true';
-
+    // ── Re-read the live geofence flag (source of truth for status) ──────────
+    const syncGeofenceFlag = useCallback(async () => {
+        try {
+            const inside = (await AsyncStorage.getItem(KEY_INSIDE_OFFICE)) === 'true';
             setIsInsideGeofence(inside);
-        };
 
-        loadData();
-
-        const subscription = DeviceEventEmitter.addListener(
-            ATTENDANCE_UPDATED_EVENT,
-            async () => {
-                await loadAttendanceData();
-
-                const inside =
-                    (await AsyncStorage.getItem(
-                        'isInsideOfficeGeofence',
-                    )) === 'true';
-
-                setIsInsideGeofence(inside);
-            },
-        );
-
-        return () => subscription.remove();
-    }, []);
-    // ── Subscribe to geofence events ──────────────────────────────────────────
-    useEffect(() => {
-        const sub = DeviceEventEmitter.addListener(
-            ATTENDANCE_UPDATED_EVENT,
-            event => {
-                // Brief visual flash of what just happened, then reload
-                setLastEvent(event?.type || null);
-                loadAttendanceData();
-                setTimeout(() => setLastEvent(null), 4000);
-            },
-        );
-        return () => sub.remove();
-    }, []);
-
-    // ── Live timer ────────────────────────────────────────────────────────────
-    useEffect(() => {
-        let interval;
-        if (currentStatus === 'CHECKED_IN' && activeCheckIn) {
-            interval = setInterval(() => {
-                setLiveDuration(
-                    computeLiveDuration(todayRef.current, true, activeCheckInRef.current),
-                );
-            }, 1000);
+            const pending = await geofenceService.getPendingAction();
+            setIsSyncing(!!pending);
+        } catch (err) {
+            console.error('[AttendanceScreen] geofence flag sync error:', err);
         }
-        return () => clearInterval(interval);
-    }, [currentStatus, activeCheckIn]);
+    }, []);
 
-    // ── Data loader ───────────────────────────────────────────────────────────
-    const loadAttendanceData = async () => {
+    // ── Data loader (history only — does NOT drive live status anymore) ──────
+    const loadAttendanceData = useCallback(async () => {
         try {
             setLoading(true);
 
@@ -158,38 +140,16 @@ export default function AttendanceScreen() {
                 const todayRecord = history.find(a => a.date === today) || null;
                 setTodayAttendance(todayRecord);
 
-                // A record with no latestCheckOut means an open session
-                const hasOpenSession =
-                    !!todayRecord &&
-                    !!todayRecord.oldestCheckIn &&
-                    !todayRecord.latestCheckOut;
-
-                setCurrentStatus(
-                    hasOpenSession ? 'CHECKED_IN' : 'CHECKED_OUT',
-                );
-
-                if (hasOpenSession) {
+                // activeCheckIn time comes from history (for the duration
+                // calc), but whether we're "checked in" comes from the
+                // geofence flag — set separately in syncGeofenceFlag().
+                if (isInsideRef.current) {
                     const checkInTime = todayRecord?.oldestCheckIn || null;
-
                     setActiveCheckIn(checkInTime);
-
-                    setLiveDuration(
-                        computeLiveDuration(
-                            todayRecord,
-                            true,
-                            checkInTime,
-                        ),
-                    );
+                    setLiveDuration(computeLiveDuration(todayRecord, true, checkInTime));
                 } else {
                     setActiveCheckIn(null);
-
-                    setLiveDuration(
-                        computeLiveDuration(
-                            todayRecord,
-                            false,
-                            null,
-                        ),
-                    );
+                    setLiveDuration(computeLiveDuration(todayRecord, false, null));
                 }
             }
         } catch (error) {
@@ -198,15 +158,73 @@ export default function AttendanceScreen() {
             setLoading(false);
             setRefreshing(false);
         }
-    };
+    }, []);
+
+    const refreshAll = useCallback(async () => {
+        await syncGeofenceFlag();
+        await loadAttendanceData();
+    }, [syncGeofenceFlag, loadAttendanceData]);
+
+    // ── Initial load ──────────────────────────────────────────────────────────
+    useEffect(() => {
+        refreshAll();
+    }, [refreshAll]);
+
+    // ── Subscribe to geofence events (check-in / check-out, incl. retry sync) ─
+    useEffect(() => {
+        const sub = DeviceEventEmitter.addListener(
+            ATTENDANCE_UPDATED_EVENT,
+            event => {
+                setLastEvent(event?.type || null);
+                refreshAll();
+                setTimeout(() => setLastEvent(null), 4000);
+            },
+        );
+        return () => sub.remove();
+    }, [refreshAll]);
+
+    // ── Re-sync on app foreground — covers the case where a transition or
+    //    a retry happened in the background/killed state while screen was
+    //    unmounted, so the UI doesn't show stale data when reopened. ──────────
+    useEffect(() => {
+        const sub = AppState.addEventListener('change', state => {
+            if (state === 'active') {
+                refreshAll();
+            }
+        });
+        return () => sub.remove();
+    }, [refreshAll]);
+
+    // ── Safety poll — catches any edge case where an event was missed
+    //    (e.g. JS event emitter timing during a headless wakeup). Cheap:
+    //    just an AsyncStorage read, not a network call, every 10s. ───────────
+    useEffect(() => {
+        const interval = setInterval(syncGeofenceFlag, 10000);
+        return () => clearInterval(interval);
+    }, [syncGeofenceFlag]);
+
+    // ── Live timer ────────────────────────────────────────────────────────────
+    useEffect(() => {
+        let interval;
+        if (isInsideGeofence) {
+            interval = setInterval(() => {
+                setLiveDuration(
+                    computeLiveDuration(todayRef.current, true, activeCheckInRef.current),
+                );
+            }, 1000);
+        }
+        return () => clearInterval(interval);
+    }, [isInsideGeofence]);
 
     const onRefresh = () => {
         setRefreshing(true);
-        loadAttendanceData();
+        refreshAll();
     };
 
-    // ── Derived display values ────────────────────────────────────────────────
-    const isCheckedIn = currentStatus === 'CHECKED_IN';
+    // isInsideGeofence (live GPS truth) IS the checked-in status now —
+    // no more OR-ing with a history-derived currentStatus.
+    const isCheckedIn = isInsideGeofence;
+
     const statusColor = isCheckedIn ? '#10B981' : '#EF4444';
     const statusLabel = isCheckedIn ? 'Checked In' : 'Not In';
 
@@ -243,6 +261,16 @@ export default function AttendanceScreen() {
                     Track attendance and office status
                 </Text>
             </View>
+
+            {/* Syncing banner — shows when a check-in/out is queued for retry */}
+            {isSyncing && (
+                <View style={styles.syncBanner}>
+                    <Icon name="sync" size={16} color="#92400E" />
+                    <Text style={styles.syncText}>
+                        Syncing attendance with server…
+                    </Text>
+                </View>
+            )}
 
             {/* Geofence event toast */}
             {lastEvent && (
@@ -310,11 +338,11 @@ export default function AttendanceScreen() {
             {/* Today's Session */}
             <Text style={styles.sectionTitle}>Today's Session</Text>
 
-            {todayAttendance ? (
+            {todayAttendance || isCheckedIn ? (
                 <View style={styles.sessionCard}>
                     <View style={styles.sessionHeader}>
                         <Text style={styles.sessionDate}>
-                            {todayAttendance.date || new Date().toISOString().split('T')[0]}
+                            {todayAttendance?.date || new Date().toISOString().split('T')[0]}
                         </Text>
                         <View
                             style={[
@@ -346,7 +374,7 @@ export default function AttendanceScreen() {
                         <Text style={styles.sessionValue}>
                             {isCheckedIn && activeCheckIn
                                 ? formatTime(activeCheckIn)
-                                : formatTime(todayAttendance.oldestCheckIn)}
+                                : formatTime(todayAttendance?.oldestCheckIn)}
                         </Text>
                     </View>
 
@@ -365,7 +393,7 @@ export default function AttendanceScreen() {
                         >
                             {isCheckedIn
                                 ? 'Active session'
-                                : todayAttendance.latestCheckOut
+                                : todayAttendance?.latestCheckOut
                                     ? formatTime(todayAttendance.latestCheckOut)
                                     : '—'}
                         </Text>
@@ -375,7 +403,7 @@ export default function AttendanceScreen() {
                         <Icon name="repeat" size={16} color="#6B7280" />
                         <Text style={styles.sessionLabel}>Sessions</Text>
                         <Text style={styles.sessionValue}>
-                            {todayAttendance.totalSessions || 1}
+                            {todayAttendance?.totalSessions || 1}
                         </Text>
                     </View>
 
@@ -487,6 +515,18 @@ const styles = StyleSheet.create({
     },
     headerTitle: { color: '#fff', fontSize: 28, fontWeight: 'bold', marginTop: 8 },
     headerSubtitle: { color: '#D1D5DB', fontSize: 14, marginTop: 4 },
+
+    syncBanner: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        marginHorizontal: 20,
+        marginTop: 12,
+        padding: 10,
+        borderRadius: 10,
+        backgroundColor: '#FEF3C7',
+    },
+    syncText: { fontSize: 12, fontWeight: '600', color: '#92400E' },
 
     toastBanner: {
         flexDirection: 'row',

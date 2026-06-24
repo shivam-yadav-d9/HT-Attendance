@@ -121,6 +121,14 @@ const locationService = {
                     OFFICE_LOCATION.longitude,
                 );
 
+                console.log('========================');
+                console.log('Current Latitude :', latitude);
+                console.log('Current Longitude:', longitude);
+                console.log('Office Latitude  :', OFFICE_LOCATION.latitude);
+                console.log('Office Longitude :', OFFICE_LOCATION.longitude);
+                console.log('Distance (m)     :', distanceToOffice);
+                console.log('========================');
+
                 const payload = {
                     coords: pos.coords,
                     distanceToOffice,
