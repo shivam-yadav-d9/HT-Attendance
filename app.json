@@ -1,4 +1,9 @@
 {
   "name": "MyApp",
-  "displayName": "MyApp"
+  "displayName": "MyApp",
+  "extra": {
+    "eas": {
+      "projectId": "3c74e2fb-a5fb-4216-bc23-6ab804ef9bbf"
+    }
+  }
 }

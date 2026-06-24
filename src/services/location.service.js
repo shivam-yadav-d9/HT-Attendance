@@ -113,14 +113,18 @@ const locationService = {
             pos => {
                 _lastCoords = pos.coords;
                 const { latitude, longitude } = pos.coords;
-                getDistanceMeters(
+
+                const distanceToOffice = getDistanceMeters(
                     latitude,
                     longitude,
                     OFFICE_LOCATION.latitude,
                     OFFICE_LOCATION.longitude,
-                )
+                );
 
-                const payload = { coords: pos.coords, distanceToOffice };
+                const payload = {
+                    coords: pos.coords,
+                    distanceToOffice,
+                };
                 DeviceEventEmitter.emit(LOCATION_UPDATED_EVENT, payload);
                 if (onUpdate) onUpdate(payload);
             },
@@ -168,8 +172,8 @@ const locationService = {
         );
     },
 
-    OFFICE_LAT,
-    OFFICE_LNG,
+    OFFICE_LAT: OFFICE_LOCATION.latitude,
+    OFFICE_LNG: OFFICE_LOCATION.longitude,
     LOCATION_UPDATED_EVENT,
 };
 
