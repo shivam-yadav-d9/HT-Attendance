@@ -63,7 +63,16 @@ export default function LoginScreen({ navigation }) {
             }
 
             // Navigate to main screen — don't block on the Alert
-            navigation.replace('Main');
+            // Save login successfully
+            Alert.alert('Success', 'Login successful');
+
+            // Refresh AppNavigator
+            setLoading(false);
+
+            // Small delay so AppNavigator reads AsyncStorage again
+            setTimeout(() => {
+                navigation.getParent()?.reset?.();
+            }, 100);
         } catch (error) {
             console.error('[Login] Error:', error);
             Alert.alert('Error', 'An error occurred during login. Please try again.');

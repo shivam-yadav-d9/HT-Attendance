@@ -1,7 +1,9 @@
-import React, {useEffect, useState} from 'react';
-import {ActivityIndicator, View} from 'react-native';
+// src/navigation/AppNavigator.js
+
+import React, { useEffect, useState } from 'react';
+import { ActivityIndicator, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import {createNativeStackNavigator} from '@react-navigation/native-stack';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
 import LoginScreen from '../screens/Auth/LoginScreen';
 import BottomTabs from './BottomTabs';
@@ -12,10 +14,6 @@ const Stack = createNativeStackNavigator();
 export default function AppNavigator() {
   const [loading, setLoading] = useState(true);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-
-  useEffect(() => {
-    checkLogin();
-  }, []);
 
   const checkLogin = async () => {
     try {
@@ -28,7 +26,9 @@ export default function AppNavigator() {
         // Auto start geofence after app restart
         try {
           const employeeId =
-            user.employeeNumber || user.employeeId || user.id;
+            user.employeeNumber ||
+            user.employeeId ||
+            user.id;
 
           if (employeeId) {
             await geofenceService.startTracking(employeeId);
@@ -42,12 +42,26 @@ export default function AppNavigator() {
         setIsLoggedIn(false);
       }
     } catch (error) {
-      console.log('[AppNavigator] Auto Login Error:', error);
+      console.log('[AppNavigator] Login Check Error:', error);
       setIsLoggedIn(false);
     } finally {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    // Initial login check
+    checkLogin();
+
+    // Keep checking login status every second
+    const interval = setInterval(() => {
+      checkLogin();
+    }, 1000);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, []);
 
   if (loading) {
     return (
@@ -64,18 +78,18 @@ export default function AppNavigator() {
   }
 
   return (
-    <Stack.Navigator screenOptions={{headerShown: false}}>
+    <Stack.Navigator screenOptions={{ headerShown: false }}>
       {isLoggedIn ? (
         <Stack.Screen
           name="Main"
           component={BottomTabs}
-          options={{animation: 'fade'}}
+          options={{ animation: 'fade' }}
         />
       ) : (
         <Stack.Screen
           name="Login"
           component={LoginScreen}
-          options={{animation: 'fade'}}
+          options={{ animation: 'fade' }}
         />
       )}
     </Stack.Navigator>

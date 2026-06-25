@@ -12,11 +12,11 @@ export const OFFICE_LOCATION = {
 // ~200m radius — the OS will not fire enter/exit transitions consistently.
 // If you need tighter precision than 200m, you cannot use native geofences
 // alone; you'd need to pair this with a foreground polling check.
-export const CHECKIN_RADIUS_M = 150;
+export const CHECKIN_RADIUS_M = 100;
 
 // Exit when beyond this distance — larger than entry to prevent GPS-jitter
 // flicker right at the boundary (hysteresis).
-export const CHECKOUT_RADIUS_M = 200;
+export const CHECKOUT_RADIUS_M = 150;
 
 // Legacy alias (keeps any old imports working)
 export const MAX_DISTANCE = CHECKIN_RADIUS_M;

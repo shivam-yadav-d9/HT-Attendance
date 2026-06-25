@@ -612,10 +612,10 @@ const geofenceService = {
         } catch (err) {
             console.warn('[GeofenceService] stop error:', err?.message);
         }
-        if (_appStateSub) {
+        if (_appStateSub && typeof _appStateSub.remove === 'function') {
             _appStateSub.remove();
-            _appStateSub = null;
         }
+        _appStateSub = null;
         await writeIsInside(false);
         await writeOpenSession(null);
         await writePendingAction(null);
