@@ -244,10 +244,13 @@ const queueRetry = async (employeeId, action, coords) => {
 
 const callAttendanceApi = (action, employeeId, coords) => {
     if (action === 'CHECK_IN') {
+        console.log("CHECK IN START");
         return attendanceService.checkIn(
+
             employeeId,
             String(coords.latitude),
             String(coords.longitude),
+
         );
     }
     return attendanceService.checkOut(
@@ -274,6 +277,7 @@ const tryFlushPendingAction = async () => {
     _retryInFlight = true;
     try {
         const result = await callAttendanceApi(pending.action, pending.employeeId, pending.coords);
+        console.log(result);
 
         if (result?.success) {
             // Retry succeeded — clear the queue and fire the proper
@@ -420,7 +424,9 @@ const attachListeners = () => {
             // disagreeing with reality forever — nothing else corrects it.
             const actuallyInside = distanceM <= CHECKIN_RADIUS_M;
 
-            if (actuallyInside && !cachedInside) {
+            const session = await readOpenSession();
+
+            if (actuallyInside && (!cachedInside || !session)) {
                 const employeeId = await AsyncStorage.getItem(KEY_EMPLOYEE_ID);
                 if (employeeId) {
                     console.log('[GeofenceService] self-heal: GPS says inside, flag said outside — forcing ENTER');
@@ -428,7 +434,12 @@ const attachListeners = () => {
                 }
                 return;
             }
-            if (!actuallyInside && distanceM > CHECKOUT_RADIUS_M && cachedInside) {
+            if (
+                !actuallyInside &&
+                distanceM > CHECKOUT_RADIUS_M &&
+                cachedInside &&
+                session
+            ) {
                 const employeeId = await AsyncStorage.getItem(KEY_EMPLOYEE_ID);
                 if (employeeId) {
                     console.log('[GeofenceService] self-heal: GPS says outside, flag said inside — forcing EXIT');
@@ -440,9 +451,16 @@ const attachListeners = () => {
             if (cachedInside) return; // status notif already says "inside"
             const pending = await readPendingAction();
             await updateStatusNotification({ isInside: false, distanceM, syncing: !!pending });
+            console.log("========== LOCATION ==========");
+            console.log(location.coords.latitude);
+            console.log(location.coords.longitude);
+            console.log(distanceM);
+            console.log(actuallyInside);
+            console.log(cachedInside);
         } catch (err) {
             console.warn('[GeofenceService] onLocation handler error:', err?.message);
         }
+
     });
 
     BackgroundGeolocation.onProviderChange(event => {
@@ -502,8 +520,17 @@ const geofenceService = {
         // Already running? Just return.
         try {
             const state = await BackgroundGeolocation.getState();
+
             if (state.enabled) {
                 console.log('[GeofenceService] already running');
+
+                await AsyncStorage.setItem(
+                    KEY_EMPLOYEE_ID,
+                    String(employeeId),
+                );
+
+                await tryFlushPendingAction();
+
                 return true;
             }
         } catch (e) {
@@ -580,8 +607,14 @@ const geofenceService = {
                 },
             });
 
-            await BackgroundGeolocation.startGeofences();
-
+            await BackgroundGeolocation.getCurrentPosition({
+                samples: 1,
+                persist: false,
+                timeout: 30,
+                maximumAge: 0,
+                desiredAccuracy:
+                    BackgroundGeolocation.DESIRED_ACCURACY_HIGH,
+            });
             // Flush any retry that was queued from a previous app session
             // (e.g. user force-killed the app right after a failed API call).
             await tryFlushPendingAction();
