@@ -4,22 +4,23 @@
 // Location: react-native-background-geolocation (Transistor Software)
 // Notifications: @notifee/react-native
 //
-// FIX (this version):
-//   Previous version reverted `isInsideOfficeGeofence` back to its old
-//   value whenever the check-in/check-out API call failed. That caused
-//   a desync: the NATIVE geofence plugin still correctly knows you're
-//   inside/outside, but our JS-side flag disagreed — so the UI showed
-//   "Not In" while you were standing in the office (or vice versa), and
-//   wouldn't fix itself until you walked all the way out and back in
-//   (because the OS only fires ENTER/EXIT on an actual transition).
-//
-//   Fix: NEVER revert the inside/outside flag based on API success.
-//   The flag reflects GPS reality and is always trusted. If the API
-//   call fails, we instead queue a retry (persisted to AsyncStorage so
-//   it survives app kill) and keep retrying on every location tick,
-//   every new geofence event, and on app foreground — until it
-//   succeeds. The notification reflects "syncing" while a retry is
-//   pending so you can see it's not stuck.
+// FIX (this version, on top of your previous file):
+//   1. Self-heal EXIT check in onLocation() no longer requires `session`
+//      to be truthy. Previously: if a check-in API call ever failed (or
+//      its response shape didn't match expectations) before
+//      writeOpenSession() ran, `session` stayed null in AsyncStorage
+//      FOREVER — and since EXIT required `session` to be truthy, auto
+//      checkout silently stopped working permanently, no matter how far
+//      outside you walked. `cachedInside` (KEY_INSIDE_OFFICE) is already
+//      the single source of truth for "are we checked in" — that alone
+//      is now sufficient to trigger the self-heal EXIT.
+//   2. (See AppNavigator.js) startTracking() must only be called ONCE on
+//      app boot / once on login — never on an interval or repeated
+//      listener. Calling it repeatedly tears down and re-adds the native
+//      geofence (removeGeofence + addGeofence) every time, which is the
+//      most likely reason the OS-level onGeofence ENTER/EXIT callback
+//      wasn't firing reliably and you were depending entirely on the
+//      slower onLocation self-heal poll instead.
 //
 // Why native geofencing instead of JS polling:
 //   - Geofence transitions are detected by the OS itself (Android
@@ -29,19 +30,6 @@
 //     your onGeofence callback, then lets the process die again.
 //   - stopOnTerminate:false + startOnBoot:true means tracking survives
 //     "swipe to close" and device reboot, with zero user action needed.
-//
-// Install (bare RN CLI):
-//   npm install react-native-background-geolocation
-//   npm install @notifee/react-native
-//   npm install react-native-permissions
-//
-// Then relink native code:
-//   cd android && ./gradlew clean && cd ..
-//   npx react-native run-android
-//
-// License: react-native-background-geolocation is free for development
-// and ALL debug builds. A license key is only required for Android
-// RELEASE builds — see notes at the bottom of this file.
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppState, DeviceEventEmitter, Platform } from 'react-native';
@@ -244,15 +232,14 @@ const queueRetry = async (employeeId, action, coords) => {
 
 const callAttendanceApi = (action, employeeId, coords) => {
     if (action === 'CHECK_IN') {
-        console.log("CHECK IN START");
+        console.log('[GeofenceService] CHECK IN START');
         return attendanceService.checkIn(
-
             employeeId,
             String(coords.latitude),
             String(coords.longitude),
-
         );
     }
+    console.log('[GeofenceService] CHECK OUT START');
     return attendanceService.checkOut(
         employeeId,
         String(coords.latitude),
@@ -277,7 +264,7 @@ const tryFlushPendingAction = async () => {
     _retryInFlight = true;
     try {
         const result = await callAttendanceApi(pending.action, pending.employeeId, pending.coords);
-        console.log(result);
+        console.log('[GeofenceService] retry result:', result);
 
         if (result?.success) {
             // Retry succeeded — clear the queue and fire the proper
@@ -338,6 +325,8 @@ const handleGeofenceTransition = async (employeeId, action, coords) => {
             String(coords.longitude),
         );
 
+        console.log('[GeofenceService] checkIn result:', result);
+
         if (result?.success) {
             const session = result.data?.attendance || { checkInTime: new Date().toISOString() };
             await writeOpenSession(session);
@@ -347,6 +336,9 @@ const handleGeofenceTransition = async (employeeId, action, coords) => {
             DeviceEventEmitter.emit(ATTENDANCE_UPDATED_EVENT, { type: 'CHECK_IN', session });
         } else {
             // API failed — do NOT revert isInside. Queue retry instead.
+            // NOTE: openSession stays whatever it was (likely null) — that's
+            // fine now because the EXIT self-heal below no longer depends
+            // on it being truthy.
             await queueRetry(employeeId, 'CHECK_IN', coords);
             await updateStatusNotification({ isInside: true, syncing: true });
         }
@@ -358,6 +350,8 @@ const handleGeofenceTransition = async (employeeId, action, coords) => {
             String(coords.latitude),
             String(coords.longitude),
         );
+
+        console.log('[GeofenceService] checkOut result:', result);
 
         if (result?.success) {
             await writeOpenSession(null);
@@ -393,6 +387,7 @@ const attachListeners = () => {
     // from the killed-app headless context on Android.
     BackgroundGeolocation.onGeofence(async event => {
         try {
+            console.log('[GeofenceService] onGeofence event:', event?.action, event?.identifier);
             const employeeId =
                 event?.extras?.employeeId || (await AsyncStorage.getItem(KEY_EMPLOYEE_ID));
             if (!employeeId) return;
@@ -408,6 +403,9 @@ const attachListeners = () => {
     // Live location stream — keeps the status notification's distance
     // readout fresh, AND opportunistically retries any queued failed
     // check-in/out so a flaky network blip doesn't stay unsynced for long.
+    // It is ALSO the self-heal safety net: if the native onGeofence event
+    // above ever gets missed/debounced by the OS, this catches it within
+    // one location tick by comparing GPS truth to the cached flag.
     BackgroundGeolocation.onLocation(async location => {
         try {
             await tryFlushPendingAction();
@@ -419,14 +417,19 @@ const attachListeners = () => {
             );
 
             const cachedInside = await readIsInside();
+            const actuallyInside = distanceM <= CHECKIN_RADIUS_M;
+
+            console.log(`[GeofenceService] tick dist=${Math.round(distanceM)}m actuallyInside=${actuallyInside} cachedInside=${cachedInside}`);
+
             // GPS-truth vs cached flag self-heal: if the OS missed/debounced
             // an ENTER or EXIT transition, the cached flag can get stuck
             // disagreeing with reality forever — nothing else corrects it.
-            const actuallyInside = distanceM <= CHECKIN_RADIUS_M;
-
-            const session = await readOpenSession();
-
-            if (actuallyInside && (!cachedInside || !session)) {
+            // `cachedInside` alone (KEY_INSIDE_OFFICE) is the single source
+            // of truth for "are we checked in" — we no longer also require
+            // `session` to be truthy here. Requiring it could permanently
+            // disable auto-checkout if a prior check-in's API response
+            // ever failed before writeOpenSession() ran.
+            if (actuallyInside && !cachedInside) {
                 const employeeId = await AsyncStorage.getItem(KEY_EMPLOYEE_ID);
                 if (employeeId) {
                     console.log('[GeofenceService] self-heal: GPS says inside, flag said outside — forcing ENTER');
@@ -434,12 +437,7 @@ const attachListeners = () => {
                 }
                 return;
             }
-            if (
-                !actuallyInside &&
-                distanceM > CHECKOUT_RADIUS_M &&
-                cachedInside &&
-                session
-            ) {
+            if (!actuallyInside && distanceM > CHECKOUT_RADIUS_M && cachedInside) {
                 const employeeId = await AsyncStorage.getItem(KEY_EMPLOYEE_ID);
                 if (employeeId) {
                     console.log('[GeofenceService] self-heal: GPS says outside, flag said inside — forcing EXIT');
@@ -451,16 +449,9 @@ const attachListeners = () => {
             if (cachedInside) return; // status notif already says "inside"
             const pending = await readPendingAction();
             await updateStatusNotification({ isInside: false, distanceM, syncing: !!pending });
-            console.log("========== LOCATION ==========");
-            console.log(location.coords.latitude);
-            console.log(location.coords.longitude);
-            console.log(distanceM);
-            console.log(actuallyInside);
-            console.log(cachedInside);
         } catch (err) {
             console.warn('[GeofenceService] onLocation handler error:', err?.message);
         }
-
     });
 
     BackgroundGeolocation.onProviderChange(event => {
@@ -469,7 +460,8 @@ const attachListeners = () => {
 
     // Also retry whenever the app comes to the foreground — covers the
     // case where the user opens the app on wifi after a retry was queued
-    // while out of signal range.
+    // while out of signal range. This is a RETRY flush only — it must
+    // NEVER call startTracking() again here.
     if (!_appStateSub) {
         _appStateSub = AppState.addEventListener('change', state => {
             if (state === 'active') {
@@ -502,7 +494,12 @@ export const registerHeadlessTask = () => {
 const geofenceService = {
     /**
      * One-time SDK init + start tracking. Call right after successful login,
-     * and also on app boot if a session already exists (see App.jsx).
+     * and also on app boot if a session already exists (see App.jsx /
+     * AppNavigator.js). IMPORTANT: call this exactly once per app
+     * lifecycle event (boot or login) — NOT on a poll/interval/listener
+     * that fires repeatedly. Repeated calls tear down and re-add the
+     * native geofence every time via removeGeofence()+addGeofence(),
+     * which can prevent the OS from firing ENTER/EXIT reliably.
      */
     startTracking: async employeeId => {
 
@@ -517,18 +514,15 @@ const geofenceService = {
             return startPromise;
         }
 
-        // Already running? Just return.
+        // Already running? Just return — do NOT re-init the geofence.
         try {
             const state = await BackgroundGeolocation.getState();
 
             if (state.enabled) {
                 console.log('[GeofenceService] already running');
 
-                await AsyncStorage.setItem(
-                    KEY_EMPLOYEE_ID,
-                    String(employeeId),
-                );
-
+                await AsyncStorage.setItem(KEY_EMPLOYEE_ID, String(employeeId));
+                attachListeners(); // safe no-op if already attached
                 await tryFlushPendingAction();
 
                 return true;
@@ -583,29 +577,30 @@ const geofenceService = {
                 reset: false,
             });
 
-            // Remove existing geofence if already present
-            try {
-                await BackgroundGeolocation.removeGeofence(
-                    OFFICE_GEOFENCE_ID,
-                );
-            } catch (e) {
-                // ignore
+            // Register office geofence ONLY if it isn't already registered —
+            // avoids the remove+add churn that happens on every re-init.
+            const existing = await BackgroundGeolocation.getGeofences();
+            const alreadyAdded = existing?.some(g => g.identifier === OFFICE_GEOFENCE_ID);
+
+            if (!alreadyAdded) {
+                await BackgroundGeolocation.addGeofence({
+                    identifier: OFFICE_GEOFENCE_ID,
+                    radius: CHECKIN_RADIUS_M,
+                    latitude: OFFICE_LOCATION.latitude,
+                    longitude: OFFICE_LOCATION.longitude,
+                    notifyOnEntry: true,
+                    notifyOnExit: true,
+                    notifyOnDwell: false,
+                    loiteringDelay: 0,
+                    extras: {
+                        employeeId,
+                    },
+                });
+            } else {
+                console.log('[GeofenceService] office geofence already registered — skipping re-add');
             }
 
-            // Register office geofence
-            await BackgroundGeolocation.addGeofence({
-                identifier: OFFICE_GEOFENCE_ID,
-                radius: CHECKIN_RADIUS_M,
-                latitude: OFFICE_LOCATION.latitude,
-                longitude: OFFICE_LOCATION.longitude,
-                notifyOnEntry: true,
-                notifyOnExit: true,
-                notifyOnDwell: false,
-                loiteringDelay: 0,
-                extras: {
-                    employeeId,
-                },
-            });
+            await BackgroundGeolocation.start();
 
             await BackgroundGeolocation.getCurrentPosition({
                 samples: 1,
@@ -682,52 +677,3 @@ const geofenceService = {
 };
 
 export default geofenceService;
-
-/*
-─── AndroidManifest.xml changes needed (android/app/src/main/AndroidManifest.xml) ──
-
-Inside <manifest> tag, alongside any permissions you already have:
-  <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
-  <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
-  <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
-  <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
-  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
-  <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-
-react-native-background-geolocation auto-merges most of its own native
-manifest entries via its Gradle plugin — you generally do NOT need to
-hand-add its service/receiver tags on RN CLI >= 0.71. If the build fails
-with a manifest merge conflict, check node_modules/react-native-background-geolocation/android/src/main/AndroidManifest.xml
-for the exact entries to reconcile.
-
-─── android/app/build.gradle — license key (RELEASE builds only) ─────────────
-
-Free for all DEBUG builds. For a signed release APK, add to
-android/app/src/main/AndroidManifest.xml inside <application>:
-
-  <meta-data
-    android:name="com.transistorsoft.locationmanager.license"
-    android:value="YOUR_LICENSE_KEY_HERE" />
-
-Get the key from the Transistor customer dashboard after purchase.
-Leave this meta-data tag OUT entirely for debug/dev testing.
-
-─── App.jsx changes needed ─────────────────────────────────────────────────────
-
-At the very top, BEFORE the App component, outside any component body:
-
-  import { registerHeadlessTask } from './src/services/geofence.service';
-  registerHeadlessTask();
-
-This must run on every JS bundle load — including the headless wakeup —
-so put it at module scope in App.jsx (or index.js), never inside useEffect.
-(Your current App.jsx already does this correctly — no change needed there.)
-
-─── Rebuild after install ──────────────────────────────────────────────────────
-
-  cd android
-  ./gradlew clean
-  cd ..
-  npx react-native run-android
-*/

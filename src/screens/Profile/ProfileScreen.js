@@ -8,11 +8,13 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Alert,
+  DeviceEventEmitter,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import { useNavigation } from '@react-navigation/native';
 import geofenceService from '../../services/geofence.service';
+import { AUTH_STATE_CHANGED_EVENT } from '../../navigation/AppNavigator';
 
 export default function ProfileScreen() {
   const navigation = useNavigation();
@@ -59,11 +61,6 @@ export default function ProfileScreen() {
 
               // Clear all user data
               await AsyncStorage.clear();
-
-
-
-              // Navigation will be handled by AppNavigator
-              // The app will automatically redirect to login screen
             } catch (error) {
               console.error('Logout error:', error);
               // Even if there's an error, try to clear storage
@@ -77,6 +74,13 @@ export default function ProfileScreen() {
               } catch (clearError) {
                 console.error('Error clearing storage:', clearError);
               }
+            } finally {
+              // Tell AppNavigator to re-check auth state right now.
+              // AppNavigator only checks login state on mount + this event
+              // — without firing this, AsyncStorage.clear() above has no
+              // way to reach AppNavigator and the user stays stuck on the
+              // current screen even though they're "logged out".
+              DeviceEventEmitter.emit(AUTH_STATE_CHANGED_EVENT);
             }
           },
         },

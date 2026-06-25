@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
+    DeviceEventEmitter,
     Image,
     ScrollView,
     StatusBar,
@@ -16,6 +17,7 @@ import {
 import Icon from 'react-native-vector-icons/MaterialIcons';
 import authService from '../../services/auth.service';
 import geofenceService from '../../services/geofence.service';
+import { AUTH_STATE_CHANGED_EVENT } from '../../navigation/AppNavigator';
 
 export default function LoginScreen({ navigation }) {
     const [username, setUsername] = useState('');
@@ -62,23 +64,20 @@ export default function LoginScreen({ navigation }) {
                 }
             }
 
+            // Tell AppNavigator login state changed. This keeps AppNavigator's
+            // isLoggedIn in sync with reality the same way logout does — it's
+            // a single one-shot event, not a poll/listener, so it never causes
+            // repeated geofenceService.startTracking() calls.
+            DeviceEventEmitter.emit(AUTH_STATE_CHANGED_EVENT);
+
             // Navigate to main screen — don't block on the Alert
-            // Save login successfully
-            Alert.alert('Success', 'Login successful');
-
-            // Refresh AppNavigator
-            setLoading(false);
-
-            // Small delay so AppNavigator reads AsyncStorage again
-            setTimeout(() => {
-                navigation.getParent()?.reset?.();
-            }, 100);
+            navigation.replace('Main');
         } catch (error) {
             console.error('[Login] Error:', error);
             Alert.alert('Error', 'An error occurred during login. Please try again.');
             setLoading(false);
         }
-        // No `finally` needed: the only paths that don't navigate already
+        // No finally needed: the only paths that don't navigate already
         // call setLoading(false) themselves above.
     };
 
