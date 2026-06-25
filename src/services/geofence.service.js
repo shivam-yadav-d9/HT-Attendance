@@ -419,6 +419,10 @@ const attachListeners = () => {
             const cachedInside = await readIsInside();
             const actuallyInside = distanceM <= CHECKIN_RADIUS_M;
 
+            // TEMP DEBUG — remove once the cold-start/race flag issue is found.
+            const __rawTick = await AsyncStorage.getItem(KEY_INSIDE_OFFICE);
+            console.log('[GeofenceService] tick RAW value:', JSON.stringify(__rawTick));
+
             console.log(`[GeofenceService] tick dist=${Math.round(distanceM)}m actuallyInside=${actuallyInside} cachedInside=${cachedInside}`);
 
             // GPS-truth vs cached flag self-heal: if the OS missed/debounced

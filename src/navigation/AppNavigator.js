@@ -48,6 +48,12 @@ export default function AppNavigator() {
           // Safe to call once here — startTracking() internally no-ops
           // if BackgroundGeolocation is already running.
           await geofenceService.startTracking(employeeId);
+
+          // TEMP DEBUG — remove after diagnosing the cold-start flag issue.
+          const __keys = await AsyncStorage.getAllKeys();
+          console.log('[DEBUG] ALL KEYS:', __keys);
+          const __raw = await AsyncStorage.getItem('isInsideOfficeGeofence');
+          console.log('[DEBUG] RAW isInsideOfficeGeofence:', JSON.stringify(__raw));
         }
 
         setIsLoggedIn(true);

@@ -64,14 +64,19 @@ export default function LoginScreen({ navigation }) {
                 }
             }
 
-            // Tell AppNavigator login state changed. This keeps AppNavigator's
-            // isLoggedIn in sync with reality the same way logout does — it's
-            // a single one-shot event, not a poll/listener, so it never causes
-            // repeated geofenceService.startTracking() calls.
+            // Tell AppNavigator login state changed. AppNavigator's
+            // conditional render (isLoggedIn ? Main : Login) handles the
+            // actual screen swap — do NOT also call navigation.replace('Main')
+            // here. That caused a race: by the time this manual replace ran,
+            // AppNavigator had already re-rendered to the Main stack off the
+            // back of this same event, so the OLD navigator reference no
+            // longer had a 'Main' screen to replace to, producing:
+            //   "The action 'REPLACE' with payload {"name":"Main"} was not
+            //   handled by any navigator."
+            // The event alone is sufficient — it's a single one-shot emit,
+            // not a poll/listener, so it never causes repeated
+            // geofenceService.startTracking() calls either.
             DeviceEventEmitter.emit(AUTH_STATE_CHANGED_EVENT);
-
-            // Navigate to main screen — don't block on the Alert
-            navigation.replace('Main');
         } catch (error) {
             console.error('[Login] Error:', error);
             Alert.alert('Error', 'An error occurred during login. Please try again.');
